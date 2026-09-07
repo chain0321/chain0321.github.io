@@ -9,7 +9,9 @@ let tts = null;
 let activeRequestId = 0;
 let queued = 0;
 
-env.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+// Preserve Transformers' version-matched runtime URLs and Safari-specific files.
+// Overriding wasmPaths with another ORT build prevents initialization.
+env.allowLocalModels = false;
 
 function progressCallback(requestId) {
   return progress => {
@@ -24,7 +26,7 @@ async function initialize(requestId, preferWebGPU) {
   const attempts = preferWebGPU
     ? [{ device: 'webgpu', dtype: 'fp16' }, { device: 'wasm', dtype: 'q8' }]
     : [{ device: 'wasm', dtype: 'q8' }];
-  let lastError;
+  const errors = [];
   for (const attempt of attempts) {
     try {
       tts = await KokoroTTS.from_pretrained(MODEL, {
@@ -36,11 +38,11 @@ async function initialize(requestId, preferWebGPU) {
       self.postMessage({ status: 'ready', requestId, device: attempt.device, dtype: attempt.dtype });
       return;
     } catch (error) {
-      lastError = error;
+      errors.push(`${attempt.device}/${attempt.dtype}: ${String(error?.message || error).slice(0, 600)}`);
       tts = null;
     }
   }
-  throw lastError || new Error('模型无法加载');
+  throw new Error(errors.join('\n') || '模型无法加载');
 }
 
 self.addEventListener('message', async event => {
@@ -109,9 +111,11 @@ export function naturalChunks(text, target = 72, maximum = 130) {
   return chunks.filter(Boolean);
 }
 
-function friendlyError(error) {
-  const value = String(error?.message || error || '');
-  if (/memory|allocation|out of bounds/iu.test(value)) return '手机内存不足，无法运行自然语音模型。请关闭其他网页后重试。';
-  if (/fetch|network|load|failed/iu.test(value)) return '模型下载或载入失败。请检查网络后重试。';
-  return '自然语音生成中断了。请重新加载。';
+export function friendlyError(error) {
+  const value = String(error?.message || error || '未知错误').slice(0, 1400);
+  let summary = '自然语音加载或生成失败。';
+  if (/memory|allocation|out of bounds/iu.test(value)) summary = '运行语音模型时出现内存错误。';
+  else if (/fetch|network/iu.test(value)) summary = '下载语音资源失败，请检查网络连接。';
+  else if (/backend|wasm|webgpu|instantiate|compile/iu.test(value)) summary = '语音运行组件初始化失败。';
+  return `${summary} 错误详情：${value}`;
 }

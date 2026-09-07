@@ -6,7 +6,19 @@ const source = await (await import('node:fs/promises')).readFile(new URL('../neu
 const moduleSource = source.replace(/^import .*?;\n/u, 'const KokoroTTS = {}; const env = {};\n');
 const url = `data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`;
 globalThis.self = { addEventListener() {}, postMessage() {} };
-const { naturalChunks } = await import(url);
+const { naturalChunks, friendlyError } = await import(url);
+
+test('keeps version-matched Safari runtime defaults', () => {
+  assert.doesNotMatch(source, /env\.wasmPaths\s*=/u);
+  assert.match(source, /env\.allowLocalModels = false/u);
+});
+
+test('runtime errors retain their diagnostic details', () => {
+  const message = friendlyError(new Error('wasm: no available backend found'));
+  assert.match(message, /运行组件初始化失败/u);
+  assert.match(message, /no available backend found/u);
+  assert.doesNotMatch(message, /检查网络/u);
+});
 
 test('natural chunks keep words and punctuation in order while merging short sentences', () => {
   const input = '第一句话很短。第二句话也很短！第三句话继续解释认知语言学里的概念隐喻。'.repeat(20);

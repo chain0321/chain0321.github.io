@@ -86,9 +86,9 @@ function releaseScreen() {
 
 function createWorker() {
   if (worker) worker.terminate();
-  worker = new Worker(new URL('./neural-worker.mjs', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./neural-worker.mjs?v=20260907-runtime-fix', import.meta.url), { type: 'module' });
   worker.addEventListener('message', handleWorkerMessage);
-  worker.addEventListener('error', () => fail('自然语音组件加载失败。请检查网络后重新加载。'));
+  worker.addEventListener('error', event => fail(`自然语音组件加载失败。错误详情：${event.message || '浏览器未提供详情，可能是组件下载或执行失败。'}`));
 }
 
 function begin() {
@@ -102,6 +102,7 @@ function begin() {
     return;
   }
   requestId++;
+  $('retry').hidden = true;
   totalCharacters = Array.from(text).length;
   generatedCharacters = 0;
   finishedCharacters = 0;
@@ -109,7 +110,8 @@ function begin() {
   readerState = modelState === 'ready' ? 'buffering' : 'loading';
   $('current-text').textContent = '';
   render();
-  if (!worker) createWorker();
+  try { if (!worker) createWorker(); }
+  catch (error) { fail(`无法启动语音组件：${error.message}`); return; }
   if (modelState === 'ready') worker.postMessage({ type: 'generate', requestId, text });
   else worker.postMessage({ type: 'init', requestId, preferWebGPU: 'gpu' in navigator });
 }
@@ -159,14 +161,16 @@ function fail(message) {
   player.stop();
   worker?.terminate();
   worker = null;
-  setMessage(`${message} 首次模型约 170MB，请连接稳定的 Wi-Fi 后重试。`, { error: true });
+  setMessage(message, { error: true });
   $('retry').hidden = false;
   render();
 }
 
 function stop() {
   requestId++;
-  worker?.postMessage({ type: 'stop' });
+  worker?.terminate();
+  worker = null;
+  modelState = 'cold';
   player.stop();
   generationDone = false;
   readerState = 'idle';
