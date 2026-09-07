@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#101b20">
-    <meta name="description" content="粘贴长文，自动分段，用一个中文音色连续朗读。">
+    <meta name="description" content="粘贴长文，用开源中文神经语音自然朗读。">
     <meta name="referrer" content="no-referrer">
     <title>中文朗读</title>
     <link rel="stylesheet" href="./styles.css">
@@ -15,7 +15,7 @@
       <header>
         <span class="sound-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
         <h1>中文朗读</h1>
-        <p class="intro">粘贴文字，慢慢听。</p>
+        <p class="intro">粘贴文字，用更自然的中文声音慢慢听。</p>
       </header>
 
       <section class="reader" aria-label="文字朗读器">
@@ -25,7 +25,7 @@
         </div>
         <textarea id="text" placeholder="把文字粘贴到这里，长文章也可以。" spellcheck="false" aria-describedby="text-help"></textarea>
         <div class="editor-meta" id="text-help">
-          <span>自动分段 · 连续朗读</span>
+          <span>自然语音 · 连续播放</span>
           <span id="count">0 字</span>
         </div>
 
@@ -36,17 +36,17 @@
         </div>
 
         <div class="controls">
-          <button id="play" class="primary-button" type="button" disabled>正在准备中文语音…</button>
+          <button id="play" class="primary-button" type="button">准备自然语音并播放</button>
           <button id="reset" class="reset-button" type="button" hidden>回到开头</button>
         </div>
-        <p id="status" class="status" role="status" aria-live="polite">正在查找设备上的中文音色…</p>
-        <button id="retry" class="text-button retry" type="button" hidden>重新检测语音</button>
+        <p id="status" class="status" role="status" aria-live="polite">首次使用会下载约 170MB 的开源语音模型，建议连接 Wi-Fi。</p>
+        <button id="retry" class="text-button retry" type="button" hidden>重新加载</button>
       </section>
 
       <footer>
-        <p id="voice">一个中文音色 · 自然语速</p>
-        <p>朗读时请保持页面打开。切换应用或锁屏可能会暂停。</p>
-        <p class="small" id="privacy">免费使用 · 网页不保存你粘贴的文字</p>
+        <p id="voice">Kokoro 中文女声 · 舒缓语速</p>
+        <p>首次下载后会缓存到浏览器。朗读时请保持页面打开。</p>
+        <p class="small" id="privacy">免费使用 · 文字和语音都在你的浏览器内处理</p>
         <a href="https://github.com/chain0321/chain0321.github.io/tree/master/tts" target="_blank" rel="noopener noreferrer">开源代码</a>
       </footer>
       <noscript>请开启浏览器的 JavaScript，才能使用文字朗读。</noscript>

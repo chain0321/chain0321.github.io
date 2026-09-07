@@ -1,133 +1,203 @@
-import EasySpeech from './vendor/easy-speech.mjs';
-import { Reader, chooseChineseVoice } from './reader.mjs';
+import { NaturalAudioPlayer } from './natural-player.mjs';
 
 const $ = id => document.getElementById(id);
 const input = $('text');
 const play = $('play');
 const status = $('status');
-let voice = null;
-let ready = false;
-let loading = false;
+let worker = null;
+let requestId = 0;
+let modelState = 'cold';
+let readerState = 'idle';
+let generationDone = false;
+let generatedCharacters = 0;
+let finishedCharacters = 0;
+let totalCharacters = 0;
 let wakeLock = null;
-let requestingWakeLock = false;
+
+const player = new NaturalAudioPlayer({
+  onChunkStart(chunk) {
+    readerState = 'playing';
+    $('current-text').textContent = chunk.text;
+    render();
+  },
+  onChunkEnd(chunk) {
+    finishedCharacters += Array.from(chunk.text).length;
+    worker?.postMessage({ type: 'buffer_processed', requestId });
+    render();
+    finishIfComplete();
+  },
+  onDrained() { finishIfComplete(); },
+});
+
+function progressPercent() {
+  if (!totalCharacters) return 0;
+  return Math.min(100, Math.round(finishedCharacters / totalCharacters * 100));
+}
+
+function setMessage(message, { error = false, warn = false } = {}) {
+  status.textContent = message;
+  status.dataset.error = String(error);
+  status.dataset.warn = String(warn);
+}
+
+function render() {
+  const active = ['loading', 'buffering', 'playing', 'paused'].includes(readerState);
+  input.readOnly = active;
+  $('clear').disabled = active || !input.value;
+  play.disabled = !input.value.trim() || readerState === 'loading' || readerState === 'buffering';
+  const labels = {
+    idle: modelState === 'ready' ? '开始自然朗读' : '准备自然语音并播放',
+    loading: '正在下载自然语音…',
+    buffering: '正在准备开头…',
+    playing: '暂停朗读',
+    paused: '继续朗读',
+    done: '再听一遍',
+    error: '重新加载',
+  };
+  play.textContent = labels[readerState] || labels.idle;
+  $('playback').hidden = !active && readerState !== 'done';
+  $('reset').hidden = !active && readerState !== 'done';
+  const percent = progressPercent();
+  $('progress').value = percent;
+  $('percentage').textContent = `${percent}%`;
+  $('position').textContent = readerState === 'done' ? '全文读完'
+    : generatedCharacters ? `已生成 ${Math.min(generatedCharacters, totalCharacters)} / ${totalCharacters} 字`
+      : '准备自然语音';
+  if (readerState === 'playing') setMessage(generationDone ? '自然语音已生成，正在连续播放。' : '正在边生成边播放，请保持页面打开。');
+  if (readerState === 'paused') setMessage('已暂停，点继续朗读即可接着听。');
+  if (readerState === 'done') setMessage('全文已读完。');
+  if (active) void keepScreenAwake(); else releaseScreen();
+}
 
 async function keepScreenAwake() {
-  if (wakeLock || requestingWakeLock || !navigator.wakeLock || document.visibilityState !== 'visible') return;
-  requestingWakeLock = true;
+  if (wakeLock || !navigator.wakeLock || document.visibilityState !== 'visible') return;
   try {
     const lock = await navigator.wakeLock.request('screen');
-    if (!['starting', 'playing'].includes(reader.state)) {
-      await lock.release();
-      return;
-    }
     wakeLock = lock;
     lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
-  } catch { /* Listening still works without screen-wake permission. */ }
-  finally { requestingWakeLock = false; }
+  } catch { /* Audio remains usable without wake lock. */ }
 }
 
 function releaseScreen() {
-  if (!wakeLock) return;
   const lock = wakeLock;
   wakeLock = null;
-  lock.release().catch(() => {});
+  lock?.release().catch(() => {});
 }
 
-function render(snapshot) {
-  const busy = snapshot.state === 'playing' || snapshot.state === 'starting';
-  input.readOnly = busy;
-  $('clear').disabled = busy || !input.value;
-  play.disabled = !ready || !voice || !input.value.trim();
-  if (ready && voice) {
-    play.textContent = busy ? '暂停朗读'
-      : snapshot.state === 'paused' || snapshot.state === 'error' ? '继续朗读'
-        : snapshot.state === 'done' ? '再听一遍' : '开始朗读';
-    const messages = {
-      idle: '准备好了，粘贴文字后点开始朗读。',
-      starting: '正在接上语音…',
-      playing: '正在朗读，会自动接着读下一段。',
-      paused: '已暂停。继续时会从当前位置附近接着读。',
-      done: '全文已读完。',
-      error: snapshot.message,
-    };
-    status.textContent = messages[snapshot.state];
-    status.dataset.error = String(snapshot.state === 'error');
+function createWorker() {
+  if (worker) worker.terminate();
+  worker = new Worker(new URL('./neural-worker.mjs', import.meta.url), { type: 'module' });
+  worker.addEventListener('message', handleWorkerMessage);
+  worker.addEventListener('error', () => fail('自然语音组件加载失败。请检查网络后重新加载。'));
+}
+
+function begin() {
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    // Unlock Web Audio during the direct tap on iOS, before any model awaits.
+    player.unlock();
+  } catch {
+    fail('当前浏览器不支持音频播放。请用 iOS 26 的 Safari 打开。');
+    return;
   }
-  $('playback').hidden = snapshot.total === 0;
-  $('reset').hidden = snapshot.total === 0;
-  $('position').textContent = snapshot.state === 'done' ? '全文读完' : `第 ${snapshot.index + 1} / ${snapshot.total} 段`;
-  $('progress').value = snapshot.progress;
-  $('percentage').textContent = `${snapshot.progress}%`;
-  $('current-text').textContent = snapshot.current;
-  if (busy) queueMicrotask(() => { void keepScreenAwake(); }); else releaseScreen();
+  requestId++;
+  totalCharacters = Array.from(text).length;
+  generatedCharacters = 0;
+  finishedCharacters = 0;
+  generationDone = false;
+  readerState = modelState === 'ready' ? 'buffering' : 'loading';
+  $('current-text').textContent = '';
+  render();
+  if (!worker) createWorker();
+  if (modelState === 'ready') worker.postMessage({ type: 'generate', requestId, text });
+  else worker.postMessage({ type: 'init', requestId, preferWebGPU: 'gpu' in navigator });
 }
 
-const reader = new Reader(EasySpeech, render);
+function handleWorkerMessage(event) {
+  const message = event.data || {};
+  if (message.requestId && message.requestId !== requestId) return;
+  if (message.status === 'progress') {
+    const progress = Number.isFinite(message.progress) ? Math.round(message.progress) : null;
+    setMessage(progress == null ? '正在载入自然语音模型，第一次需要稍等…' : `正在下载自然语音模型：${progress}%（约 170MB）`);
+  } else if (message.status === 'ready') {
+    modelState = 'ready';
+    readerState = 'buffering';
+    $('voice').textContent = `Kokoro 中文女声 · ${message.device === 'webgpu' ? '手机 GPU' : '兼容模式'}`;
+    if (message.device !== 'webgpu') setMessage('当前浏览器未启用 GPU，生成会比较慢。建议使用 iOS 26 的 Safari。', { warn: true });
+    worker.postMessage({ type: 'generate', requestId, text: input.value.trim() });
+    render();
+  } else if (message.status === 'chunk') {
+    generatedCharacters += Array.from(message.text).length;
+    player.enqueue({ text: message.text, samples: new Float32Array(message.samples), sampleRate: message.sampleRate });
+    if (readerState === 'buffering' && player.bufferedSeconds >= 8) {
+      player.start();
+      readerState = 'playing';
+    }
+    render();
+  } else if (message.status === 'complete') {
+    generationDone = true;
+    if (readerState === 'buffering') {
+      player.start();
+      readerState = 'playing';
+    }
+    render();
+    finishIfComplete();
+  } else if (message.status === 'error') fail(message.error || '自然语音生成失败。');
+}
+
+function finishIfComplete() {
+  if (!generationDone || !player.isDrained) return;
+  readerState = 'done';
+  finishedCharacters = totalCharacters;
+  render();
+}
+
+function fail(message) {
+  modelState = 'cold';
+  readerState = 'error';
+  player.stop();
+  worker?.terminate();
+  worker = null;
+  setMessage(`${message} 首次模型约 170MB，请连接稳定的 Wi-Fi 后重试。`, { error: true });
+  $('retry').hidden = false;
+  render();
+}
+
+function stop() {
+  requestId++;
+  worker?.postMessage({ type: 'stop' });
+  player.stop();
+  generationDone = false;
+  readerState = 'idle';
+  generatedCharacters = 0;
+  finishedCharacters = 0;
+  render();
+}
+
+play.addEventListener('click', async () => {
+  if (readerState === 'playing') {
+    await player.pause();
+    readerState = 'paused';
+    render();
+  } else if (readerState === 'paused') {
+    await player.resume();
+    readerState = 'playing';
+    render();
+  } else begin();
+});
+$('reset').addEventListener('click', stop);
+$('retry').addEventListener('click', () => { $('retry').hidden = true; begin(); });
+$('clear').addEventListener('click', () => { stop(); input.value = ''; updateCount(); input.focus(); });
+input.addEventListener('input', updateCount);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && readerState === 'playing') void keepScreenAwake();
+});
+window.addEventListener('pagehide', () => { void player.pause(); releaseScreen(); });
 
 function updateCount() {
   $('count').textContent = `${Array.from(input.value).length.toLocaleString('zh-CN')} 字`;
-  render(reader.snapshot());
+  $('clear').disabled = !input.value;
+  play.disabled = !input.value.trim();
 }
-
-function updateVoice() {
-  if (reader.state === 'starting' || reader.state === 'playing' || reader.state === 'paused') return;
-  voice = chooseChineseVoice(window.speechSynthesis?.getVoices() || []);
-  if (voice) {
-    $('voice').textContent = `中文 · ${voice.name}${voice.localService ? ' · 设备音色' : ' · 系统在线音色'}`;
-    $('privacy').textContent = voice.localService
-      ? '免费使用 · 网页不上传或保存你粘贴的文字'
-      : '免费使用 · 网页不保存文字，当前音色由系统联网朗读';
-    $('retry').hidden = true;
-    render(reader.snapshot());
-  } else {
-    play.disabled = true;
-    play.textContent = '暂未找到中文语音';
-    status.textContent = '请先在手机系统中下载普通话语音，再点重新检测。iPhone 上建议用 Safari 打开。';
-    status.dataset.error = 'true';
-    $('retry').hidden = false;
-  }
-}
-
-async function initialize() {
-  if (loading) return;
-  loading = true;
-  ready = false;
-  play.disabled = true;
-  play.textContent = '正在准备中文语音…';
-  $('retry').hidden = true;
-  status.textContent = '正在查找设备上的中文音色…';
-  status.dataset.error = 'false';
-  try {
-    await EasySpeech.init({ maxTimeout: 10000, interval: 250, maxLengthExceeded: 'error' });
-    ready = true;
-    updateVoice();
-  } catch {
-    play.textContent = '语音暂时不可用';
-    status.textContent = '浏览器没有提供可用的语音。请用 Safari 或 Chrome 打开此页面，再试一次。';
-    status.dataset.error = 'true';
-    $('retry').hidden = false;
-  } finally { loading = false; }
-}
-
-play.addEventListener('click', () => {
-  if (reader.state === 'playing' || reader.state === 'starting') reader.pause();
-  else {
-    // Do not put clipboard, voice-loading, wake-lock or any await before speak.
-    reader.play(input.value.trim(), voice);
-  }
-});
-$('reset').addEventListener('click', () => reader.reset());
-$('clear').addEventListener('click', () => {
-  reader.reset();
-  input.value = '';
-  updateCount();
-  input.focus();
-});
-input.addEventListener('input', () => { reader.reset(false); updateCount(); });
-$('retry').addEventListener('click', () => { EasySpeech.reset(); void initialize(); });
-window.speechSynthesis?.addEventListener('voiceschanged', () => { if (ready) updateVoice(); });
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && ['starting', 'playing'].includes(reader.state)) void keepScreenAwake();
-});
-window.addEventListener('pagehide', () => { reader.pause(); releaseScreen(); });
-void initialize();
+updateCount();
